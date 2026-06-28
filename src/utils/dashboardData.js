@@ -58,7 +58,7 @@ function normalizeMockDashboardTotals(dataset) {
 }
 
 export function getDashboardData(user) {
-  if (user?.role === ADMIN_USERNAME) {
+  if (user?.role === 'admin') {
     return normalizeMockDashboardTotals(createDemoDataset({ currentDate: MOCK_DASHBOARD_DATE }))
   }
 
