@@ -2,7 +2,6 @@ import { v4 as uuidv4 } from 'uuid'
 import { DEMO_DATASET_VERSION } from './demoDataset.js'
 import { ADMIN_USERNAME, getDashboardData } from './dashboardData.js'
 import { ensureUserData, getInitialUserData, saveUserData } from './userDataStore.js'
-import { createAdminUserContext, createUserContext } from './userContext.js'
 
 const KEYS = {
   students: 'lessontrack_students',
@@ -58,8 +57,30 @@ const defaultAdminAccount = {
   password: '123456',
 }
 
+const defaultUserRole = 'user'
+
 function isAdminSession(session) {
   return session?.role === 'admin'
+}
+
+function createUserContext({ id, userId, username, role } = {}) {
+  const normalizedRole = ['admin', 'teacher', defaultUserRole].includes(role) ? role : defaultUserRole
+  const normalizedUsername = String(username || userId || id || '').trim()
+  const normalizedId = String(id || userId || normalizedUsername || 'anonymous').trim()
+
+  return {
+    id: normalizedId,
+    username: normalizedUsername || normalizedId,
+    role: normalizedRole,
+  }
+}
+
+function createAdminUserContext(username = ADMIN_USERNAME) {
+  return createUserContext({
+    id: ADMIN_USERNAME,
+    username,
+    role: 'admin',
+  })
 }
 
 function writeDatasetToStorage(dataset) {

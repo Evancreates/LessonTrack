@@ -1,5 +1,4 @@
 import { getDashboardData } from './dashboardData.js'
-import { createUserContext } from './userContext.js'
 
 const USER_DATA_KEY_PREFIX = 'lessontrack_user_data'
 
@@ -9,6 +8,18 @@ function getUserDataKey(userId) {
 
 function cloneData(data) {
   return JSON.parse(JSON.stringify(data))
+}
+
+function createUserContext({ id, userId, username, role } = {}) {
+  const normalizedRole = ['admin', 'teacher', 'user'].includes(role) ? role : 'user'
+  const normalizedUsername = String(username || userId || id || '').trim()
+  const normalizedId = String(id || userId || normalizedUsername || 'anonymous').trim()
+
+  return {
+    id: normalizedId,
+    username: normalizedUsername || normalizedId,
+    role: normalizedRole,
+  }
 }
 
 export function createEmptyUserData() {
