@@ -1,6 +1,8 @@
 import { v4 as uuidv4 } from 'uuid'
 import { DEMO_DATASET_VERSION } from './demoDataset.js'
 import { ADMIN_USERNAME, getDashboardData } from './dashboardData.js'
+import { ensureUserData, getInitialUserData, saveUserData } from './userDataStore.js'
+import { createAdminUserContext, createUserContext } from './userContext.js'
 
 const KEYS = {
   students: 'lessontrack_students',
@@ -60,9 +62,7 @@ function isAdminSession(session) {
   return session?.role === 'admin'
 }
 
-function writeDashboardDataset(user) {
-  const dataset = getDashboardData(user)
-
+function writeDatasetToStorage(dataset) {
   write(KEYS.courses, dataset.courses)
   write(KEYS.students, dataset.students)
   write(KEYS.enrollments, dataset.enrollments)
@@ -71,10 +71,39 @@ function writeDashboardDataset(user) {
   write(KEYS.teachers, dataset.teachers)
   write(KEYS.attendanceDrafts, [])
   writeObject(KEYS.counters, dataset.counters)
+}
+
+function getCurrentDatasetFromStorage() {
+  return {
+    courses: read(KEYS.courses),
+    students: read(KEYS.students),
+    enrollments: read(KEYS.enrollments),
+    sessions: read(KEYS.sessions),
+    attendance: read(KEYS.attendance),
+    teachers: read(KEYS.teachers),
+    counters: readObject(KEYS.counters),
+  }
+}
+
+function getSessionUserContext(user) {
+  if (isAdminSession(user)) return createAdminUserContext(user.username || ADMIN_USERNAME)
+  return createUserContext({
+    id: user?.userId || user?.id,
+    username: user?.username,
+    role: user?.role,
+  })
+}
+
+function writeDashboardDataset(user, dataset) {
+  const userContext = getSessionUserContext(user)
+  const nextDataset = dataset || (isAdminSession(user) ? getInitialUserData(userContext) : ensureUserData(userContext))
+
+  writeDatasetToStorage(nextDataset)
+  saveUserData(userContext.id, nextDataset)
   writeObject(KEYS.dashboardDataSource, {
-    role: user?.role || '',
-    userId: user?.userId || '',
-    demoDatasetVersion: dataset.counters?.demoDatasetVersion || null,
+    role: userContext.role,
+    userId: userContext.id,
+    demoDatasetVersion: nextDataset.counters?.demoDatasetVersion || null,
   })
 }
 
@@ -89,6 +118,14 @@ function applyDashboardDataForUser(user) {
     userId: user?.userId || '',
     demoDatasetVersion: null,
   })
+}
+
+function restoreDashboardDataForSession(session) {
+  if (!isAdminSession(session)) return
+
+  const userContext = getSessionUserContext(session)
+  const baselineData = getInitialUserData(userContext)
+  writeDashboardDataset(session, baselineData)
 }
 
 function ensureDashboardDataForSession(session) {
@@ -112,6 +149,15 @@ function shouldUseStoredDashboardData() {
 
   ensureDashboardDataForSession(session)
   return true
+}
+
+function persistActiveUserData() {
+  const session = readObject(KEYS.authSession)
+  if (!session.role || !session.userId) return
+  if (isAdminSession(session)) return
+
+  const userContext = getSessionUserContext(session)
+  saveUserData(userContext.id, getCurrentDatasetFromStorage())
 }
 
 function toCreditNumber(value) {
@@ -555,7 +601,10 @@ export const getStudents = () => {
   migrateStudentCredits()
   return read(KEYS.students)
 }
-export const saveStudents = (students) => write(KEYS.students, students)
+export const saveStudents = (students) => {
+  write(KEYS.students, students)
+  persistActiveUserData()
+}
 
 export const getCourses = () => {
   if (!shouldUseStoredDashboardData()) return []
@@ -569,6 +618,7 @@ export const getCourses = () => {
 export const saveCourses = (courses) => {
   write(KEYS.courses, courses.map(normalizeCourseForSave))
   syncTeachersWithCourses()
+  persistActiveUserData()
 }
 
 export const getEnrollments = () => {
@@ -577,7 +627,10 @@ export const getEnrollments = () => {
   migrateSaasFields()
   return read(KEYS.enrollments)
 }
-export const saveEnrollments = (enrollments) => write(KEYS.enrollments, enrollments)
+export const saveEnrollments = (enrollments) => {
+  write(KEYS.enrollments, enrollments)
+  persistActiveUserData()
+}
 
 export const getSessions = () => {
   if (!shouldUseStoredDashboardData()) return []
@@ -585,7 +638,10 @@ export const getSessions = () => {
   migrateCourseTimelineDistribution()
   return read(KEYS.sessions)
 }
-export const saveSessions = (sessions) => write(KEYS.sessions, sessions)
+export const saveSessions = (sessions) => {
+  write(KEYS.sessions, sessions)
+  persistActiveUserData()
+}
 
 export const getAttendance = () => {
   if (!shouldUseStoredDashboardData()) return []
@@ -593,7 +649,10 @@ export const getAttendance = () => {
   migrateCourseTimelineDistribution()
   return read(KEYS.attendance)
 }
-export const saveAttendance = (attendance) => write(KEYS.attendance, attendance)
+export const saveAttendance = (attendance) => {
+  write(KEYS.attendance, attendance)
+  persistActiveUserData()
+}
 
 export const getAttendanceDrafts = () => read(KEYS.attendanceDrafts)
 export const saveAttendanceDrafts = (drafts) => write(KEYS.attendanceDrafts, drafts)
@@ -607,6 +666,7 @@ export const recalculateStudentCredits = () => {
   })
   const students = read(KEYS.students)
   write(KEYS.students, students.map((student) => ({ ...student, usedCredits: attendedStudentIds.get(student.id) || 0 })))
+  persistActiveUserData()
 }
 
 function getStoredTeachers() {
@@ -627,12 +687,13 @@ export const saveTeachers = (teachers) => {
   const teacherMigration = getTeacherNumberMigration(teachers, counters)
   write(KEYS.teachers, teacherMigration.teachers)
   writeObject(KEYS.counters, teacherMigration.counters)
+  persistActiveUserData()
 }
 
 export const getAdminAccount = () => {
   const account = readObject(KEYS.adminAccount)
-  const username = String(account.username || defaultAdminAccount.username).trim()
-  const password = String(account.password || defaultAdminAccount.password)
+  const username = defaultAdminAccount.username
+  const password = defaultAdminAccount.password
   const normalized = { username, password }
   if (account.username !== normalized.username || account.password !== normalized.password) {
     writeObject(KEYS.adminAccount, normalized)
@@ -653,9 +714,12 @@ export const updateAdminAccount = ({ username, currentPassword, nextPassword }) 
 
 export const getAuthSession = () => {
   const session = readObject(KEYS.authSession)
-  if (session.role === 'admin' && session.userId === ADMIN_USERNAME) return { userId: ADMIN_USERNAME, role: 'admin' }
+  if (session.role === 'admin' && session.userId === ADMIN_USERNAME) {
+    return { userId: ADMIN_USERNAME, username: session.username || ADMIN_USERNAME, role: 'admin' }
+  }
   if (session.role === 'teacher' && session.userId && getStoredTeachers().some((teacher) => teacher.id === session.userId)) {
-    return { userId: session.userId, role: 'teacher' }
+    const teacher = getStoredTeachers().find((item) => item.id === session.userId)
+    return { userId: session.userId, username: teacher?.username || session.username || session.userId, role: 'teacher' }
   }
   return null
 }
@@ -665,7 +729,7 @@ export const authenticateUser = ({ username, password }) => {
   const passwordText = String(password || '')
   const adminAccount = getAdminAccount()
   if (accountName === adminAccount.username && passwordText === adminAccount.password) {
-    const session = { userId: ADMIN_USERNAME, role: 'admin' }
+    const session = { userId: ADMIN_USERNAME, username: adminAccount.username, role: 'admin' }
     writeObject(KEYS.authSession, session)
     writeObject(KEYS.currentRole, session)
     applyDashboardDataForUser(session)
@@ -677,7 +741,7 @@ export const authenticateUser = ({ username, password }) => {
     && String(item.password || '') === passwordText
   ))
   if (teacher) {
-    const session = { userId: teacher.id, role: 'teacher' }
+    const session = { userId: teacher.id, username: teacher.username, role: 'teacher' }
     writeObject(KEYS.authSession, session)
     writeObject(KEYS.currentRole, session)
     applyDashboardDataForUser(session)
@@ -688,6 +752,11 @@ export const authenticateUser = ({ username, password }) => {
 }
 
 export const clearAuthSession = () => {
+  const session = readObject(KEYS.authSession)
+  if (isAdminSession(session)) {
+    writeObject(KEYS.adminAccount, defaultAdminAccount)
+  }
+  restoreDashboardDataForSession(session)
   localStorage.removeItem(KEYS.authSession)
 }
 
@@ -707,6 +776,11 @@ export const getCurrentRole = () => {
 
 export const saveCurrentRole = (role) => writeObject(KEYS.currentRole, role)
 
+export const getCurrentUserContext = () => {
+  const session = getAuthSession() || getCurrentRole()
+  return getSessionUserContext(session)
+}
+
 export const getSettings = () => {
   const settings = readObject(KEYS.settings)
   return {
@@ -720,10 +794,13 @@ export const saveSettings = (settings) => writeObject(KEYS.settings, {
   ...settings,
 })
 
-export const saveCounters = (counters) => writeObject(KEYS.counters, {
-  ...readObject(KEYS.counters),
-  ...counters,
-})
+export const saveCounters = (counters) => {
+  writeObject(KEYS.counters, {
+    ...readObject(KEYS.counters),
+    ...counters,
+  })
+  persistActiveUserData()
+}
 
 export const generateCourseCode = () => {
   migrateSaasFields()
@@ -737,6 +814,7 @@ export const generateCourseCode = () => {
   const counterSequence = counters.courseCodeYear === year ? Number(counters.courseCodeSequence) || 0 : 0
   const sequence = Math.max(counterSequence, maxExistingSequence) + 1
   writeObject(KEYS.counters, { ...counters, courseCodeYear: year, courseCodeSequence: sequence })
+  persistActiveUserData()
   return formatCourseCode(year, sequence)
 }
 
@@ -752,6 +830,7 @@ export const generateStudentNo = () => {
   const counterSequence = counters.studentNoMonthKey === monthKey ? Number(counters.studentNoSequence) || 0 : 0
   const sequence = Math.max(counterSequence, maxExistingSequence) + 1
   writeObject(KEYS.counters, { ...counters, studentNoMonthKey: monthKey, studentNoSequence: sequence })
+  persistActiveUserData()
   return formatStudentNo(monthKey, sequence)
 }
 
@@ -767,5 +846,6 @@ export const generateTeacherNo = () => {
   const counterSequence = counters.teacherNoYear === year ? Number(counters.teacherNoSequence) || 0 : 0
   const sequence = Math.max(counterSequence, maxExistingSequence) + 1
   writeObject(KEYS.counters, { ...counters, teacherNoYear: year, teacherNoSequence: sequence })
+  persistActiveUserData()
   return formatTeacherNo(year, sequence)
 }
