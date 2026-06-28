@@ -1,4 +1,4 @@
-import { createDemoDataset } from './demoDataset.js'
+import { ADMIN_USERNAME, getDashboardData } from './dashboardData.js'
 import {
   saveAttendance,
   saveAttendanceDrafts,
@@ -12,7 +12,7 @@ import {
 } from './storage.js'
 
 export function loadDemoData() {
-  const dataset = createDemoDataset()
+  const dataset = getDashboardData({ userId: ADMIN_USERNAME, role: 'admin' })
 
   saveTeachers([])
   saveCourses(dataset.courses)
@@ -23,7 +23,7 @@ export function loadDemoData() {
   saveAttendance(dataset.attendance)
   saveAttendanceDrafts([])
   saveCounters(dataset.counters)
-  saveCurrentRole({ userId: 'admin', role: 'admin' })
+  saveCurrentRole({ userId: ADMIN_USERNAME, role: 'admin' })
 
   return {
     students: dataset.students.length,

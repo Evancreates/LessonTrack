@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
-import { createDemoDataset, DEMO_DATASET_VERSION } from './demoDataset.js'
+import { DEMO_DATASET_VERSION } from './demoDataset.js'
+import { ADMIN_USERNAME, getDashboardData } from './dashboardData.js'
 
 const KEYS = {
   students: 'lessontrack_students',
@@ -14,6 +15,7 @@ const KEYS = {
   adminAccount: 'lessontrack_admin_account',
   attendanceDrafts: 'lessontrack_attendance_drafts',
   settings: 'lessontrack_settings',
+  dashboardDataSource: 'lessontrack_dashboard_data_source',
 }
 
 function read(key) {
@@ -50,8 +52,66 @@ const defaultSettings = {
 }
 
 const defaultAdminAccount = {
-  username: 'admin',
+  username: ADMIN_USERNAME,
   password: '123456',
+}
+
+function isAdminSession(session) {
+  return session?.role === 'admin'
+}
+
+function writeDashboardDataset(user) {
+  const dataset = getDashboardData(user)
+
+  write(KEYS.courses, dataset.courses)
+  write(KEYS.students, dataset.students)
+  write(KEYS.enrollments, dataset.enrollments)
+  write(KEYS.sessions, dataset.sessions)
+  write(KEYS.attendance, dataset.attendance)
+  write(KEYS.teachers, dataset.teachers)
+  write(KEYS.attendanceDrafts, [])
+  writeObject(KEYS.counters, dataset.counters)
+  writeObject(KEYS.dashboardDataSource, {
+    role: user?.role || '',
+    userId: user?.userId || '',
+    demoDatasetVersion: dataset.counters?.demoDatasetVersion || null,
+  })
+}
+
+function applyDashboardDataForUser(user) {
+  if (isAdminSession(user)) {
+    writeDashboardDataset(user)
+    return
+  }
+
+  writeObject(KEYS.dashboardDataSource, {
+    role: user?.role || '',
+    userId: user?.userId || '',
+    demoDatasetVersion: null,
+  })
+}
+
+function ensureDashboardDataForSession(session) {
+  if (!isAdminSession(session)) return
+
+  const source = readObject(KEYS.dashboardDataSource)
+  if (
+    source.role === session.role
+    && source.userId === session.userId
+    && source.demoDatasetVersion === DEMO_DATASET_VERSION
+  ) {
+    return
+  }
+
+  writeDashboardDataset(session)
+}
+
+function shouldUseStoredDashboardData() {
+  const session = readObject(KEYS.authSession)
+  if (!isAdminSession(session)) return false
+
+  ensureDashboardDataForSession(session)
+  return true
 }
 
 function toCreditNumber(value) {
@@ -349,7 +409,7 @@ function migrateCourseTimelineDistribution() {
   const looksLikeDemoData = students.length >= 100 && courses.length >= 10
   if (!looksLikeDemoData) return
 
-  const dataset = createDemoDataset({ currentDate: today() })
+  const dataset = getDashboardData({ userId: ADMIN_USERNAME, role: 'admin' })
   write(KEYS.courses, dataset.courses)
   write(KEYS.enrollments, dataset.enrollments)
   write(KEYS.sessions, dataset.sessions)
@@ -487,6 +547,7 @@ function migrateLegacyAttendance() {
 }
 
 export const getStudents = () => {
+  if (!shouldUseStoredDashboardData()) return []
   migrateLegacyRelations()
   migrateSaasFields()
   migrateCourseSchedules()
@@ -497,6 +558,7 @@ export const getStudents = () => {
 export const saveStudents = (students) => write(KEYS.students, students)
 
 export const getCourses = () => {
+  if (!shouldUseStoredDashboardData()) return []
   migrateLegacyRelations()
   migrateSaasFields()
   migrateCourseSchedules()
@@ -510,6 +572,7 @@ export const saveCourses = (courses) => {
 }
 
 export const getEnrollments = () => {
+  if (!shouldUseStoredDashboardData()) return []
   migrateLegacyRelations()
   migrateSaasFields()
   return read(KEYS.enrollments)
@@ -517,6 +580,7 @@ export const getEnrollments = () => {
 export const saveEnrollments = (enrollments) => write(KEYS.enrollments, enrollments)
 
 export const getSessions = () => {
+  if (!shouldUseStoredDashboardData()) return []
   migrateLegacyAttendance()
   migrateCourseTimelineDistribution()
   return read(KEYS.sessions)
@@ -524,6 +588,7 @@ export const getSessions = () => {
 export const saveSessions = (sessions) => write(KEYS.sessions, sessions)
 
 export const getAttendance = () => {
+  if (!shouldUseStoredDashboardData()) return []
   migrateLegacyAttendance()
   migrateCourseTimelineDistribution()
   return read(KEYS.attendance)
@@ -544,13 +609,18 @@ export const recalculateStudentCredits = () => {
   write(KEYS.students, students.map((student) => ({ ...student, usedCredits: attendedStudentIds.get(student.id) || 0 })))
 }
 
-export const getTeachers = () => {
+function getStoredTeachers() {
   migrateLegacyRelations()
   migrateSaasFields()
   migrateCourseSchedules()
   migrateCourseTimelineDistribution()
   syncTeachersWithCourses()
   return read(KEYS.teachers)
+}
+
+export const getTeachers = () => {
+  if (!shouldUseStoredDashboardData()) return []
+  return getStoredTeachers()
 }
 export const saveTeachers = (teachers) => {
   const counters = readObject(KEYS.counters)
@@ -583,8 +653,8 @@ export const updateAdminAccount = ({ username, currentPassword, nextPassword }) 
 
 export const getAuthSession = () => {
   const session = readObject(KEYS.authSession)
-  if (session.role === 'admin' && session.userId === 'admin') return { userId: 'admin', role: 'admin' }
-  if (session.role === 'teacher' && session.userId && getTeachers().some((teacher) => teacher.id === session.userId)) {
+  if (session.role === 'admin' && session.userId === ADMIN_USERNAME) return { userId: ADMIN_USERNAME, role: 'admin' }
+  if (session.role === 'teacher' && session.userId && getStoredTeachers().some((teacher) => teacher.id === session.userId)) {
     return { userId: session.userId, role: 'teacher' }
   }
   return null
@@ -595,13 +665,14 @@ export const authenticateUser = ({ username, password }) => {
   const passwordText = String(password || '')
   const adminAccount = getAdminAccount()
   if (accountName === adminAccount.username && passwordText === adminAccount.password) {
-    const session = { userId: 'admin', role: 'admin' }
+    const session = { userId: ADMIN_USERNAME, role: 'admin' }
     writeObject(KEYS.authSession, session)
     writeObject(KEYS.currentRole, session)
+    applyDashboardDataForUser(session)
     return { ok: true, session, redirectPath: '/' }
   }
 
-  const teacher = getTeachers().find((item) => (
+  const teacher = getStoredTeachers().find((item) => (
     String(item.username || '').trim() === accountName
     && String(item.password || '') === passwordText
   ))
@@ -609,6 +680,7 @@ export const authenticateUser = ({ username, password }) => {
     const session = { userId: teacher.id, role: 'teacher' }
     writeObject(KEYS.authSession, session)
     writeObject(KEYS.currentRole, session)
+    applyDashboardDataForUser(session)
     return { ok: true, session, redirectPath: '/my-courses' }
   }
 
@@ -621,14 +693,14 @@ export const clearAuthSession = () => {
 
 export const getCurrentRole = () => {
   const currentRole = readObject(KEYS.currentRole)
-  if (currentRole.role === 'teacher' && currentRole.userId && getTeachers().some((teacher) => teacher.id === currentRole.userId)) {
+  if (currentRole.role === 'teacher' && currentRole.userId && getStoredTeachers().some((teacher) => teacher.id === currentRole.userId)) {
     return { userId: currentRole.userId, role: 'teacher' }
   }
   if (currentRole.role === 'admin' && currentRole.userId) {
     return { userId: currentRole.userId, role: 'admin' }
   }
 
-  const adminRole = { userId: 'admin', role: 'admin' }
+  const adminRole = { userId: ADMIN_USERNAME, role: 'admin' }
   writeObject(KEYS.currentRole, adminRole)
   return adminRole
 }
